@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rilevamento Oggetti con YOLO</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+            background-color: #f0f2f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { color: #333; }
+        .video-container {
+            position: relative;
+            margin: 20px auto;
+            width: 100%;
+            max-width: 640px;
+        }
+        #video {
+            width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        #canvas {
+            display: none;
+        }
+        #output {
+            width: 100%;
+            max-width: 640px;
+            margin: 20px auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 5px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+        }
+        .status.connected {
+            color: #155724;
+            background-color: #d4edda;
+        }
+        .status.disconnected {
+            color: #721c24;
+            background-color: #f8d7da;
+        }
+        .controls {
+            margin: 15px 0;
+        }
+        .fps-counter {
+            font-size: 14px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        .quality-controls {
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Rilevamento Oggetti in Tempo Reale</h1>
+        <p>Utilizza la tua webcam per rilevare oggetti con il modello YOLO.</p>
+        
+        <div class="status disconnected" id="connection-status">
+            Non connesso al server
+        </div>
+        
+        <div class="fps-counter" id="fps-counter">FPS: --</div>
+        
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="start-btn">Avvia Camera</button>
+            <button id="stop-btn" disabled>Ferma Camera</button>
+        </div>
+        
+        <div class="quality-controls">
+            <label for="resolution-select">Risoluzione:</label>
+            <select id="resolution-select">
+                <option value="320x240">Bassa (320x240)</option>
+                <option value="480x360">Media (480x360)</option>
+                <option value="640x480" selected>Alta (640x480)</option>
+            </select>
+            
+            <label for="quality-slider">Qualità immagine:</label>
+            <input type="range" id="quality-slider" min="10" max="90" value="70">
+            <span id="quality-value">70%</span>
+            
+            <label for="fps-limit">Limite FPS:</label>
+            <select id="fps-limit">
+                <option value="0">Illimitato</option>
+                <option value="5">5 FPS</option>
+                <option value="10" selected>10 FPS</option>
+                <option value="15">15 FPS</option>
+                <option value="20">20 FPS</option>
+            </select>
+        </div>
+        
+        <div>
+            <img id="output" src="" alt="Immagine con rilevamenti" style="display: none;">
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const output = document.getElementById('output');
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const statusDisplay = document.getElementById('connection-status');
+        const fpsCounter = document.getElementById('fps-counter');
+        const resolutionSelect = document.getElementById('resolution-select');
+        const qualitySlider = document.getElementById('quality-slider');
+        const qualityValue = document.getElementById('quality-value');
+        const fpsLimitSelect = document.getElementById('fps-limit');
+        
+        let stream = null;
+        let isConnected = false;
+        let socket = null;
+        let animationFrame = null;
+        let isProcessing = false;
+        let frameCount = 0;
+        let lastTime = performance.now();
+        let fpsLimit = parseInt(fpsLimitSelect.value);
+        let frameInterval = fpsLimit > 0 ? 1000 / fpsLimit : 0;
+        let lastFrameTime = 0;
+        
+        // Aggiorna il valore della qualità
+        qualitySlider.addEventListener('input', function() {
+            qualityValue.textContent = `${this.value}%`;
+        });
+        
+        // Aggiorna il valore del limite FPS
+        fpsLimitSelect.addEventListener('change', function() {
+            fpsLimit = parseInt(this.value);
+            frameInterval = fpsLimit > 0 ? 1000 / fpsLimit : 0;
+        });
+        
+        // Collegamento WebSocket
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            socket = new WebSocket(wsUrl);
+            
+            socket.onopen = function(e) {
+                isConnected = true;
+                statusDisplay.textContent = 'Connesso al server';
+                statusDisplay.className = 'status connected';
+            };
+            
+            socket.onmessage = function(event) {
+                output.src = event.data;
+                output.style.display = 'block';
+                isProcessing = false;
+                frameCount++;
+                
+                // Calcola FPS
+                const now = performance.now();
+                if (now - lastTime >= 1000) {
+                    fpsCounter.textContent = `FPS: ${frameCount}`;
+                    frameCount = 0;
+                    lastTime = now;
+                }
+            };
+            
+            socket.onclose = function(event) {
+                isConnected = false;
+                statusDisplay.textContent = 'Disconnesso dal server';
+                statusDisplay.className = 'status disconnected';
+            };
+            
+            socket.onerror = function(error) {
+                console.error(`Errore WebSocket: ${error}`);
+                statusDisplay.textContent = 'Errore di connessione';
+                statusDisplay.className = 'status disconnected';
+            };
+        }
+        
+        // Configura la risoluzione della webcam
+        function getVideoConstraints() {
+            const [width, height] = resolutionSelect.value.split('x').map(Number);
+            return { 
+                facingMode: 'environment',
+                width: { ideal: width },
+                height: { ideal: height }
+            };
+        }
+        
+        // Avvia la webcam
+        async function startCamera() {
+            try {
+                const constraints = {
+                    video: getVideoConstraints(),
+                    audio: false
+                };
+                
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                
+                // Abilita/disabilita i pulsanti
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                
+                // Avvia la connessione WebSocket
+                connectWebSocket();
+                
+                // Avvia il loop di invio frame
+                startSendingFrames();
+                
+            } catch (error) {
+                console.error('Errore accesso alla webcam:', error);
+                alert('Impossibile accedere alla webcam. Assicurati di aver dato i permessi necessari.');
+            }
+        }
+        
+        // Ferma la webcam
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+            }
+            
+            // Chiudi la connessione WebSocket
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+            
+            // Ferma il loop di invio frame
+            if (animationFrame) {
+                cancelAnimationFrame(animationFrame);
+                animationFrame = null;
+            }
+            
+            // Abilita/disabilita i pulsanti
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            
+            // Nasconde l'output
+            output.style.display = 'none';
+        }
+        
+        // Invia i frame della webcam al server
+        function sendFrame() {
+            animationFrame = requestAnimationFrame(sendFrame);
+            
+            const now = performance.now();
+            // Limita la frequenza dei frame
+            if (frameInterval > 0 && now - lastFrameTime < frameInterval) {
+                return;
+            }
+            
+            if (video.readyState === video.HAVE_ENOUGH_DATA && isConnected && !isProcessing) {
+                lastFrameTime = now;
+                isProcessing = true;
+                
+                const ctx = canvas.getContext('2d');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                // Ottieni la qualità dell'immagine dal cursore
+                const imageQuality = parseInt(qualitySlider.value) / 100;
+                
+                const imageData = canvas.toDataURL('image/jpeg', imageQuality);
+                socket.send(imageData);
+            }
+        }
+        
+        function startSendingFrames() {
+            // Avvia l'invio dei frame solo quando il video è pronto
+            video.addEventListener('loadeddata', function() {
+                animationFrame = requestAnimationFrame(sendFrame);
+            });
+        }
+        
+        // Aggiorna la risoluzione della webcam
+        resolutionSelect.addEventListener('change', async function() {
+            if (stream) {
+                stopCamera();
+                await startCamera();
+            }
+        });
+        
+        // Event listeners
+        startBtn.addEventListener('click', startCamera);
+        stopBtn.addEventListener('click', stopCamera);
+        
+        // Gestione chiusura pagina
+        window.addEventListener('beforeunload', function() {
+            stopCamera();
+        });
+    </script>
+</body>
+</html>
